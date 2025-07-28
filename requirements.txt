@@ -1,0 +1,8 @@
+streamlit
+sentence-transformers
+pandas
+numpy
+requests
+openpyxl
+torch>=1.9.0
+transformers>=4.21.0
