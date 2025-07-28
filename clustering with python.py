@@ -908,6 +908,49 @@ def stop_api_server():
 atexit.register(stop_api_server)
 
 # ==================================================
+# N8N INTEGRATION VIA FILE EXCHANGE
+# ==================================================
+
+def check_for_n8n_requests():
+    """Check for pending n8n requests in the requests folder"""
+    requests_dir = "n8n_requests"
+    if not os.path.exists(requests_dir):
+        return None
+    
+    # Look for JSON request files
+    for filename in os.listdir(requests_dir):
+        if filename.endswith('.json') and not filename.startswith('processed_'):
+            filepath = os.path.join(requests_dir, filename)
+            try:
+                with open(filepath, 'r') as f:
+                    request_data = json.load(f)
+                
+                # Mark as processed by renaming
+                processed_filepath = os.path.join(requests_dir, f"processed_{filename}")
+                os.rename(filepath, processed_filepath)
+                
+                return request_data
+            except Exception as e:
+                print(f"Error reading n8n request: {e}")
+                continue
+    
+    return None
+
+def save_results_for_n8n(result_data, request_id):
+    """Save clustering results for n8n to pick up"""
+    results_dir = "n8n_results"
+    os.makedirs(results_dir, exist_ok=True)
+    
+    result_filepath = os.path.join(results_dir, f"result_{request_id}.json")
+    try:
+        with open(result_filepath, 'w') as f:
+            json.dump(result_data, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving results for n8n: {e}")
+        return False
+
+# ==================================================
 # STREAMLIT WEB INTERFACE
 # ==================================================
 
@@ -920,7 +963,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Add installation status in sidebar
+# Check for n8n requests on page load
+n8n_request = check_for_n8n_requests()
+
+# Add n8n integration status in sidebar
 with st.sidebar:
     if SENTENCE_TRANSFORMERS_AVAILABLE:
         st.success("✅ All packages installed!")
@@ -928,6 +974,39 @@ with st.sidebar:
     else:
         st.warning("⚠️ AI model installation pending")
         st.caption("Some features may be limited")
+    
+    # n8n Integration Status
+    st.subheader("🔗 n8n Integration")
+    if n8n_request:
+        st.success("📨 n8n request detected!")
+        st.caption(f"Request ID: {n8n_request.get('request_id', 'unknown')}")
+        if st.button("🔄 Refresh for new requests"):
+            st.rerun()
+    else:
+        st.info("👂 Listening for n8n requests...")
+        st.caption("Drop JSON files in n8n_requests/ folder")
+        if st.button("🔄 Check for requests"):
+            st.rerun()
+    
+    # Create n8n folders on first run
+    if st.button("📁 Setup n8n Folders"):
+        os.makedirs("n8n_requests", exist_ok=True)
+        os.makedirs("n8n_results", exist_ok=True)
+        st.success("Created n8n_requests/ and n8n_results/ folders")
+        
+        # Create example request file
+        example_request = {
+            "request_id": "example_001",
+            "keywords": ["machine learning", "artificial intelligence", "data science"],
+            "threshold": 0.75,
+            "min_community_size": 2,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        with open("n8n_requests/example_request.json", "w") as f:
+            json.dump(example_request, f, indent=2)
+        
+        st.info("Created example request file")
     
     # API Server Controls
     st.subheader("🚀 API Server")
@@ -1088,16 +1167,41 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("📝 Input Keywords")
     
-    # Input methods
+    # Input methods - include n8n option if request detected
+    input_method_options = ["📝 Text Input", "📁 File Upload"]
+    if n8n_request:
+        input_method_options.insert(0, "🔗 n8n Request")
+    
     input_method = st.radio(
         "Choose input method:",
-        ["📝 Text Input", "📁 File Upload"],
+        input_method_options,
         horizontal=True
     )
     
     keywords_list = []
     
-    if input_method == "📝 Text Input":
+    if input_method == "🔗 n8n Request" and n8n_request:
+        keywords_list = n8n_request.get('keywords', [])
+        st.success(f"✅ Using {len(keywords_list)} keywords from n8n request")
+        
+        # Show request details
+        with st.expander("� n8n Request Details"):
+            st.json(n8n_request)
+        
+        # Show keywords in editable format
+        keywords_display = '\n'.join(keywords_list)
+        edited_keywords = st.text_area(
+            "Keywords from n8n (editable):",
+            value=keywords_display,
+            height=200,
+            help="These keywords were received from n8n. You can edit them if needed."
+        )
+        
+        if edited_keywords != keywords_display:
+            keywords_list = [k.strip() for k in edited_keywords.splitlines() if k.strip()]
+            st.info("📝 Keywords have been modified")
+    
+    elif input_method == "📝 Text Input":
         keywords_input = st.text_area(
             "Enter keywords (one per line):",
             height=200,
@@ -1169,15 +1273,41 @@ with col2:
 
 # Process button and results
 if keywords_list:
-    if st.button("🚀 Start Clustering", type="primary", use_container_width=True):
+    # Auto-process n8n requests or show manual button
+    should_process = False
+    
+    if n8n_request and input_method == "🔗 n8n Request":
+        if not st.session_state.get(f'processed_{n8n_request.get("request_id", "unknown")}', False):
+            should_process = True
+            st.info("🤖 Auto-processing n8n request...")
+            st.session_state[f'processed_{n8n_request.get("request_id", "unknown")}'] = True
+    else:
+        should_process = st.button("🚀 Start Clustering", type="primary", use_container_width=True)
+    
+    if should_process:
         
         if len(set(keywords_list)) < 2:
             st.warning("⚠️ Please provide at least 2 unique keywords for clustering.")
         else:
+            # Get clustering parameters from n8n request or UI
+            if n8n_request and input_method == "🔗 n8n Request":
+                clustering_threshold = n8n_request.get('threshold', threshold)
+                clustering_min_size = n8n_request.get('min_community_size', min_community_size)
+            else:
+                clustering_threshold = threshold
+                clustering_min_size = min_community_size
+            
             # Perform clustering
-            result = perform_clustering(keywords_list, threshold, min_community_size)
+            result = perform_clustering(keywords_list, clustering_threshold, clustering_min_size)
             
             if result:
+                # Save results for n8n if this was an n8n request
+                if n8n_request and input_method == "🔗 n8n Request":
+                    request_id = n8n_request.get('request_id', 'unknown')
+                    if save_results_for_n8n(result, request_id):
+                        st.success(f"💾 Results saved for n8n pickup: result_{request_id}.json")
+                        st.info("🔗 n8n can now read the results from the n8n_results/ folder")
+                
                 # Display results
                 st.success(f"🎉 Clustering completed! Found {result['total_clusters']} clusters in {result['processing_time']['total_time']} seconds.")
                 
@@ -1297,7 +1427,24 @@ st.markdown("""
 2. **Gunicorn** - Unix/Linux only, process-based workers
 3. **Flask Dev Server** - Fallback only, not for production
 
-### 🔗 API Integration:
+### 🔗 n8n Integration:
+
+**Method 1: File Exchange (Recommended - Solves Redirect Issues)**
+1. n8n writes request JSON files to `n8n_requests/` folder
+2. Streamlit auto-processes requests and saves results to `n8n_results/` folder  
+3. n8n reads results from the results folder
+
+**Request File Format:**
+```json
+{
+  "request_id": "req_1722164482123", 
+  "keywords": ["keyword1", "keyword2"],
+  "threshold": 0.75,
+  "min_community_size": 2
+}
+```
+
+**Method 2: API Integration (Traditional REST)**
 **API Endpoints:**
 - `POST /cluster` - Cluster keywords
 - `GET /health` - Health check
