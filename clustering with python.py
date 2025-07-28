@@ -1,31 +1,44 @@
+import subprocess
+import sys
+import importlib
+
+def install_and_import(package_name, import_name=None):
+    """Install and import a package if it's not already installed"""
+    if import_name is None:
+        import_name = package_name
+    
+    try:
+        importlib.import_module(import_name)
+        return True
+    except ImportError:
+        print(f"Installing {package_name}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            importlib.import_module(import_name)
+            return True
+        except Exception as e:
+            print(f"Failed to install {package_name}: {e}")
+            return False
+
+# Auto-install required packages
+required_packages = [
+    ("streamlit", "streamlit"),
+    ("sentence-transformers", "sentence_transformers"),
+    ("pandas", "pandas"),
+    ("numpy", "numpy"),
+    ("requests", "requests"),
+    ("openpyxl", "openpyxl")
+]
+
+print("Checking and installing required packages...")
+for package, import_name in required_packages:
+    if not install_and_import(package, import_name):
+        print(f"ERROR: Could not install {package}. Please install manually with: pip install {package}")
+        sys.exit(1)
+
+# Now import everything
 import streamlit as st
-
-# Check for required packages and show installation instructions if missing
-try:
-    from sentence_transformers import SentenceTransformer, util
-except ImportError:
-    st.error("❌ Required package 'sentence-transformers' is not installed!")
-    st.markdown("""
-    ### Installation Required
-    
-    To run this app locally, install the required packages:
-    
-    ```bash
-    pip install sentence-transformers streamlit pandas numpy requests openpyxl
-    ```
-    
-    For Streamlit Cloud, make sure you have a `requirements.txt` file with:
-    ```
-    sentence-transformers>=2.2.2
-    streamlit>=1.28.0
-    pandas>=1.5.0
-    numpy>=1.21.0
-    requests>=2.28.0
-    openpyxl>=3.0.0
-    ```
-    """)
-    st.stop()
-
+from sentence_transformers import SentenceTransformer, util
 import os
 import time
 import pandas as pd
@@ -40,8 +53,14 @@ st.set_page_config(
     layout="wide"
 )
 
+# Add installation status in sidebar
+with st.sidebar:
+    st.success("✅ All packages installed!")
+    st.caption("This app auto-installs dependencies")
+
 st.title('🔍 Keyword Clustering Tool')
 st.markdown("Cluster similar keywords using AI-powered semantic analysis")
+st.info("🚀 **Self-Sufficient App**: All dependencies are automatically installed!")
 
 # Best default parameters for optimal performance
 DEFAULT_THRESHOLD = 0.75  # Good balance between precision and recall for keywords
@@ -76,11 +95,19 @@ webhook_url = st.sidebar.text_input(
     help="Send results to this URL after clustering"
 )
 
-# Model caching with better error handling
+# Model caching with better error handling and auto-install fallback
 @st.cache_resource(show_spinner=False)
 def load_model():
     try:
         with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
+            # Try to import sentence_transformers again in case it was just installed
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                st.error("Installing sentence-transformers...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
+                from sentence_transformers import SentenceTransformer
+            
             model = SentenceTransformer('all-MiniLM-L6-v2')
         return model
     except Exception as e:
@@ -88,14 +115,27 @@ def load_model():
         st.markdown("""
         ### Troubleshooting
         
-        If you're running this on Streamlit Cloud and getting memory errors:
+        If you're getting errors:
         1. The model requires ~400MB of RAM
         2. First load may take 1-2 minutes
-        3. Consider using a smaller model like 'all-MiniLM-L12-v2'
+        3. Ensure you have a stable internet connection for model download
+        4. Try refreshing the page if installation fails
         
-        For local development, ensure you have sufficient memory available.
+        For local development, you can manually install with:
+        ```bash
+        pip install sentence-transformers torch transformers
+        ```
         """)
-        st.stop()
+        # Try manual installation as fallback
+        try:
+            st.info("Attempting manual installation of dependencies...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
+            st.success("✅ Dependencies installed! Please refresh the page.")
+            st.stop()
+        except:
+            st.error("❌ Automatic installation failed. Please install manually.")
+            st.stop()
         return None
 
 @st.cache_data
@@ -267,11 +307,31 @@ with col1:
                     content = str(uploaded_file.read(), "utf-8")
                     keywords_list = [k.strip() for k in content.splitlines() if k.strip()]
                 elif uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
+                    try:
+                        df = pd.read_csv(uploaded_file)
+                    except ImportError:
+                        st.error("Installing pandas for CSV support...")
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas"])
+                        import pandas as pd
+                        df = pd.read_csv(uploaded_file)
                     keywords_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
                 elif uploaded_file.name.endswith('.xlsx'):
-                    df = pd.read_excel(uploaded_file)
-                    keywords_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+                    try:
+                        df = pd.read_excel(uploaded_file)
+                    except ImportError:
+                        st.error("Installing openpyxl for Excel support...")
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+                        df = pd.read_excel(uploaded_file)
+                    except Exception:
+                        # Fallback: try installing xlrd for older Excel files
+                        try:
+                            subprocess.check_call([sys.executable, "-m", "pip", "install", "xlrd"])
+                            df = pd.read_excel(uploaded_file)
+                        except:
+                            st.error("❌ Could not read Excel file. Please save as CSV instead.")
+                            keywords_list = []
+                    if 'df' in locals():
+                        keywords_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
                 
                 st.success(f"✅ Loaded {len(keywords_list)} keywords from file")
                 
@@ -394,9 +454,36 @@ st.markdown("""
 """)
 
 st.markdown("""
-### 🔗 API Integration:
+### � Self-Sufficient App Features:
+- **Auto-Installation**: All required packages are installed automatically
+- **Single File**: No need for requirements.txt or separate dependencies
+- **Streamlit Cloud Ready**: Deploy directly without configuration files
+- **Error Recovery**: Automatic fallback installation methods
+""")
+
+st.markdown("""
+### �🔗 API Integration:
 For n8n or other integrations, you can send POST requests to this Streamlit app using the webhook feature.
 """)
+
+# Installation guide for manual deployment
+with st.expander("🛠️ Manual Installation Guide"):
+    st.markdown("""
+    If automatic installation fails, you can manually install dependencies:
+    
+    ```bash
+    # Core dependencies
+    pip install streamlit sentence-transformers pandas numpy requests
+    
+    # Optional dependencies for file support
+    pip install openpyxl xlrd
+    
+    # PyTorch (CPU version for most deployments)
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    ```
+    
+    **For Streamlit Cloud**: Just upload this single file - no requirements.txt needed!
+    """)
 
 # Example JSON for API reference
 with st.expander("📋 Example Webhook Payload"):
@@ -414,3 +501,7 @@ with st.expander("📋 Example Webhook Payload"):
         "timestamp": "2025-07-28T10:30:45.123456"
     }
     st.code(json.dumps(example_payload, indent=2), language='json')
+
+# App information
+st.markdown("---")
+st.caption("🔍 Keyword Clustering Tool | Self-Sufficient Single File App | Auto-installs all dependencies")
