@@ -512,92 +512,74 @@ def start_api_server(port=5000, production=True):
         if flask_app is None:
             return False
         
-        if production:
-            # Try to use production servers
+        # Check if we're on Streamlit Cloud or in a restricted environment
+        is_streamlit_cloud = (
+            os.environ.get('STREAMLIT_CLOUD', False) or 
+            '/mount/src' in os.getcwd() or
+            '/home/adminuser' in os.getcwd()
+        )
+        
+        if production and not is_streamlit_cloud:
+            # Try to use production servers (only for local environments)
             print("🚀 Starting production API server...")
             
-            # Try Gunicorn first (Unix/Linux)
+            # Try Waitress first (cross-platform, thread-safe)
             try:
-                import gunicorn.app.base
-                print("✅ Using Gunicorn production server")
+                from waitress import serve
+                print("✅ Using Waitress production server")
                 
-                def run_gunicorn():
-                    class StandaloneApplication(gunicorn.app.base.BaseApplication):
-                        def __init__(self, app, options=None):
-                            self.options = options or {}
-                            self.application = app
-                            super().__init__()
-
-                        def load_config(self):
-                            config = {key: value for key, value in self.options.items()
-                                     if key in self.cfg.settings and value is not None}
-                            for key, value in config.items():
-                                self.cfg.set(key.lower(), value)
-
-                        def load(self):
-                            return self.application
-
-                    options = {
-                        'bind': f'0.0.0.0:{port}',
-                        'workers': 2,
-                        'worker_class': 'sync',
-                        'timeout': 300,
-                        'keepalive': 2,
-                        'max_requests': 1000,
-                        'max_requests_jitter': 100,
-                        'worker_connections': 1000,
-                        'preload_app': True
-                    }
-                    
-                    StandaloneApplication(flask_app, options).run()
+                def run_waitress():
+                    serve(
+                        flask_app,
+                        host='0.0.0.0',
+                        port=port,
+                        threads=4,
+                        connection_limit=1000,
+                        cleanup_interval=30,
+                        channel_timeout=120
+                    )
                 
-                api_server_thread = threading.Thread(target=run_gunicorn, daemon=True)
+                api_server_thread = threading.Thread(target=run_waitress, daemon=True)
                 api_server_thread.start()
                 
-                print(f"✅ Gunicorn API server started on http://0.0.0.0:{port}")
+                print(f"✅ Waitress API server started on http://0.0.0.0:{port}")
                 print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
                 print(f"🔍 Health check: http://localhost:{port}/health")
-                print("🔒 Production-ready server with multiple workers")
+                print("🔒 Production-ready server with threading")
                 return True
                 
             except ImportError:
-                print("⚠️ Gunicorn not available, trying Waitress...")
+                print("⚠️ Waitress not available, trying Gunicorn...")
                 
-                # Try Waitress (cross-platform)
+                # Try Gunicorn (Unix/Linux only, not in threads)
                 try:
-                    from waitress import serve
-                    print("✅ Using Waitress production server")
-                    
-                    def run_waitress():
-                        serve(
-                            flask_app,
-                            host='0.0.0.0',
-                            port=port,
-                            threads=4,
-                            connection_limit=1000,
-                            cleanup_interval=30,
-                            channel_timeout=120
-                        )
-                    
-                    api_server_thread = threading.Thread(target=run_waitress, daemon=True)
-                    api_server_thread.start()
-                    
-                    print(f"✅ Waitress API server started on http://0.0.0.0:{port}")
-                    print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
-                    print(f"🔍 Health check: http://localhost:{port}/health")
-                    print("🔒 Production-ready server with threading")
-                    return True
+                    import gunicorn
+                    print("❌ Gunicorn cannot run in Streamlit threads. Use standalone deployment.")
+                    print("💡 Click 'Create Standalone API' to generate a separate server file.")
+                    production = False
                     
                 except ImportError:
-                    print("⚠️ Waitress not available, falling back to development server...")
+                    print("⚠️ Gunicorn not available, falling back to development server...")
                     production = False
         
+        if is_streamlit_cloud and production:
+            print("⚠️ Production servers not supported on Streamlit Cloud.")
+            print("� Streamlit Cloud limitations prevent running production WSGI servers.")
+            print("🔧 Use the standalone API file for external deployment.")
+            production = False
+        
         if not production:
-            # Fallback to Flask development server
-            print("⚠️ Using Flask development server (not for production!)")
+            # Use Flask development server (thread-safe)
+            print("⚠️ Using Flask development server")
             
             def run_server():
-                flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+                flask_app.run(
+                    host='0.0.0.0', 
+                    port=port, 
+                    debug=False, 
+                    use_reloader=False, 
+                    threaded=True
+                )
             
             api_server_thread = threading.Thread(target=run_server, daemon=True)
             api_server_thread.start()
@@ -605,7 +587,12 @@ def start_api_server(port=5000, production=True):
             print(f"✅ Development API server started on http://localhost:{port}")
             print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
             print(f"🔍 Health check: http://localhost:{port}/health")
-            print("⚠️ WARNING: This is a development server. Use production deployment for live usage.")
+            
+            if is_streamlit_cloud:
+                print("🌐 Note: On Streamlit Cloud, API may only be accessible internally")
+            else:
+                print("⚠️ WARNING: This is a development server. Use standalone API for production.")
+            
             return True
         
     except Exception as e:
@@ -817,50 +804,91 @@ if __name__ == '__main__':
     # Load model on startup
     load_model_once()
     
-    # Try production servers
+    # Get port from environment or default
     port = int(os.environ.get('PORT', 5000))
     
+    # Production deployment strategy
+    production_server_started = False
+    
+    # Try Waitress first (most compatible)
     try:
-        # Try Gunicorn
-        import gunicorn.app.base
+        from waitress import serve
+        print(f"🚀 Starting Waitress production server on port {port}")
+        print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
+        print(f"🔍 Health check: http://localhost:{port}/health")
+        print("🔒 Production-ready WSGI server")
         
-        class StandaloneApplication(gunicorn.app.base.BaseApplication):
-            def __init__(self, app, options=None):
-                self.options = options or {}
-                self.application = app
-                super().__init__()
-
-            def load_config(self):
-                config = {key: value for key, value in self.options.items()
-                         if key in self.cfg.settings and value is not None}
-                for key, value in config.items():
-                    self.cfg.set(key.lower(), value)
-
-            def load(self):
-                return self.application
-
-        options = {
-            'bind': f'0.0.0.0:{port}',
-            'workers': 2,
-            'worker_class': 'sync',
-            'timeout': 300,
-            'keepalive': 2
-        }
-        
-        print(f"🚀 Starting Gunicorn server on port {port}")
-        StandaloneApplication(app, options).run()
+        serve(
+            app, 
+            host='0.0.0.0', 
+            port=port, 
+            threads=4,
+            connection_limit=1000,
+            cleanup_interval=30,
+            channel_timeout=120,
+            max_request_body_size=10485760  # 10MB
+        )
+        production_server_started = True
         
     except ImportError:
+        print("⚠️ Waitress not available, trying Gunicorn...")
+        
+        # Try Gunicorn (Unix/Linux systems)
         try:
-            # Try Waitress
-            from waitress import serve
-            print(f"🚀 Starting Waitress server on port {port}")
-            serve(app, host='0.0.0.0', port=port, threads=4)
+            import gunicorn.app.base
+            
+            class StandaloneApplication(gunicorn.app.base.BaseApplication):
+                def __init__(self, app, options=None):
+                    self.options = options or {}
+                    self.application = app
+                    super().__init__()
+
+                def load_config(self):
+                    config = {key: value for key, value in self.options.items()
+                             if key in self.cfg.settings and value is not None}
+                    for key, value in config.items():
+                        self.cfg.set(key.lower(), value)
+
+                def load(self):
+                    return self.application
+
+            options = {
+                'bind': f'0.0.0.0:{port}',
+                'workers': 2,
+                'worker_class': 'sync',
+                'timeout': 300,
+                'keepalive': 2,
+                'max_requests': 1000,
+                'max_requests_jitter': 100
+            }
+            
+            print(f"🚀 Starting Gunicorn production server on port {port}")
+            print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
+            print(f"🔍 Health check: http://localhost:{port}/health")
+            print("🔒 Production-ready WSGI server with workers")
+            
+            StandaloneApplication(app, options).run()
+            production_server_started = True
             
         except ImportError:
-            # Fallback to Flask dev server
-            print(f"⚠️ Starting Flask development server on port {port}")
-            app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+            print("⚠️ Gunicorn not available, falling back to Flask dev server...")
+    
+    # Fallback to Flask development server
+    if not production_server_started:
+        print(f"⚠️ Starting Flask development server on port {port}")
+        print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
+        print(f"🔍 Health check: http://localhost:{port}/health")
+        print("⚠️ WARNING: Development server - install waitress or gunicorn for production")
+        print("   pip install waitress  # Recommended for all platforms")
+        print("   pip install gunicorn  # Unix/Linux only")
+        
+        app.run(
+            host='0.0.0.0', 
+            port=port, 
+            debug=False, 
+            threaded=True,
+            use_reloader=False
+        )
 '''
     
     with open('api_server.py', 'w') as f:
@@ -903,36 +931,85 @@ with st.sidebar:
     
     # API Server Controls
     st.subheader("🚀 API Server")
+    
+    # Check if we're on Streamlit Cloud
+    is_streamlit_cloud = STREAMLIT_CLOUD_DETECTED
+    
     if FLASK_AVAILABLE and SENTENCE_TRANSFORMERS_AVAILABLE:
-        server_type = st.radio(
-            "Server Type:",
-            ["🔒 Production", "⚙️ Development"],
-            help="Production uses Gunicorn/Waitress, Development uses Flask"
-        )
-        
-        port = st.number_input("Port:", min_value=3000, max_value=9999, value=5000)
-        
-        production_mode = server_type == "🔒 Production"
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🌐 Start API Server", help=f"Start {'production' if production_mode else 'development'} server"):
-                if start_api_server(port, production=production_mode):
-                    st.success(f"{'Production' if production_mode else 'Development'} API server started!")
-                    st.info(f"API running on http://localhost:{port}")
-        
-        with col2:
-            if st.button("📄 Create Standalone API", help="Create standalone API file for deployment"):
-                create_standalone_api_file()
-                st.success("Created api_server.py")
-                st.download_button(
-                    label="⬇️ Download API Server",
-                    data=open('api_server.py', 'r').read(),
-                    file_name='api_server.py',
-                    mime='text/x-python'
-                )
+        if is_streamlit_cloud:
+            st.info("🌐 Streamlit Cloud Environment")
+            st.caption("Production servers not supported in Streamlit Cloud threads")
+            
+            # Only show development mode and standalone options
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("⚙️ Start Dev Server", help="Start development Flask server"):
+                    if start_api_server(5000, production=False):
+                        st.success("Development API server started!")
+                        st.warning("Note: May only be accessible internally on Streamlit Cloud")
+            
+            with col2:
+                if st.button("📄 Create Standalone API", help="Create standalone API file for external deployment"):
+                    create_standalone_api_file()
+                    st.success("Created api_server.py for external deployment")
+                    
+                    # Read and provide download
+                    try:
+                        with open('api_server.py', 'r') as f:
+                            api_content = f.read()
+                        st.download_button(
+                            label="⬇️ Download API Server",
+                            data=api_content,
+                            file_name='api_server.py',
+                            mime='text/x-python'
+                        )
+                    except:
+                        st.error("Could not read generated file")
+            
+            st.markdown("💡 **For production API**: Download the standalone file and deploy separately")
+            
+        else:
+            # Local environment - show all options
+            server_type = st.radio(
+                "Server Type:",
+                ["🔒 Production (Waitress)", "⚙️ Development (Flask)"],
+                help="Production uses Waitress (thread-safe), Development uses Flask"
+            )
+            
+            port = st.number_input("Port:", min_value=3000, max_value=9999, value=5000)
+            
+            production_mode = server_type.startswith("🔒")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🌐 Start API Server", help=f"Start {'production' if production_mode else 'development'} server"):
+                    if start_api_server(port, production=production_mode):
+                        st.success(f"{'Production' if production_mode else 'Development'} API server started!")
+                        st.info(f"API running on http://localhost:{port}")
+            
+            with col2:
+                if st.button("📄 Create Standalone API", help="Create standalone API file for deployment"):
+                    create_standalone_api_file()
+                    st.success("Created api_server.py")
+                    
+                    # Read and provide download
+                    try:
+                        with open('api_server.py', 'r') as f:
+                            api_content = f.read()
+                        st.download_button(
+                            label="⬇️ Download API Server",
+                            data=api_content,
+                            file_name='api_server.py',
+                            mime='text/x-python'
+                        )
+                    except:
+                        st.error("Could not read generated file")
     else:
         st.warning("API server requires Flask and sentence-transformers")
+        if not FLASK_AVAILABLE:
+            st.caption("Flask not installed")
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            st.caption("sentence-transformers not available")
 
 st.title('🔍 Keyword Clustering Tool')
 st.markdown("Cluster similar keywords using AI-powered semantic analysis")
@@ -1207,6 +1284,18 @@ st.markdown("""
 - Upload both `clustering with python.py` and `requirements.txt`
 - The app will detect cloud environment and skip auto-installation
 - All dependencies will be installed via requirements.txt
+- **Note**: Production API servers cannot run within Streamlit Cloud due to threading limitations
+- Use the standalone API file for external production deployment
+
+**For Production API Deployment:**
+- Download the standalone API file using the sidebar button
+- Deploy separately on your preferred platform (Heroku, Railway, Google Cloud Run, etc.)
+- The standalone file includes production server selection (Waitress → Gunicorn → Flask fallback)
+
+### 🔧 Production Server Priority:
+1. **Waitress** (Recommended) - Cross-platform, thread-safe, works everywhere
+2. **Gunicorn** - Unix/Linux only, process-based workers
+3. **Flask Dev Server** - Fallback only, not for production
 
 ### 🔗 API Integration:
 **API Endpoints:**
@@ -1225,6 +1314,12 @@ curl -X POST http://localhost:5000/cluster \\
     "webhook_url": "https://your-webhook.com/endpoint"
   }'
 ```
+
+### ⚠️ Streamlit Cloud Limitations:
+- Production WSGI servers (Gunicorn/Waitress) cannot run in Streamlit threads
+- Signal handling restrictions prevent proper server initialization
+- For production API: use the standalone file on external platforms
+- Streamlit Cloud is perfect for the web interface, external deployment for API
 """)
 
 # Installation guide for manual deployment
