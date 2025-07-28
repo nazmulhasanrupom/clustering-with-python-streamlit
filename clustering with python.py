@@ -1,9 +1,35 @@
-from sentence_transformers import SentenceTransformer, util
+import streamlit as st
+
+# Check for required packages and show installation instructions if missing
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:
+    st.error("❌ Required package 'sentence-transformers' is not installed!")
+    st.markdown("""
+    ### Installation Required
+    
+    To run this app locally, install the required packages:
+    
+    ```bash
+    pip install sentence-transformers streamlit pandas numpy requests openpyxl
+    ```
+    
+    For Streamlit Cloud, make sure you have a `requirements.txt` file with:
+    ```
+    sentence-transformers>=2.2.2
+    streamlit>=1.28.0
+    pandas>=1.5.0
+    numpy>=1.21.0
+    requests>=2.28.0
+    openpyxl>=3.0.0
+    ```
+    """)
+    st.stop()
+
 import os
 import time
 import pandas as pd
 import numpy as np
-import streamlit as st
 import requests
 import json
 from datetime import datetime
@@ -50,13 +76,27 @@ webhook_url = st.sidebar.text_input(
     help="Send results to this URL after clustering"
 )
 
-# Model caching
-@st.cache_resource
+# Model caching with better error handling
+@st.cache_resource(show_spinner=False)
 def load_model():
-    with st.spinner("Loading AI model... This may take a moment on first run."):
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-    st.success("✅ Model loaded successfully!")
-    return model
+    try:
+        with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+        return model
+    except Exception as e:
+        st.error(f"❌ Failed to load model: {str(e)}")
+        st.markdown("""
+        ### Troubleshooting
+        
+        If you're running this on Streamlit Cloud and getting memory errors:
+        1. The model requires ~400MB of RAM
+        2. First load may take 1-2 minutes
+        3. Consider using a smaller model like 'all-MiniLM-L12-v2'
+        
+        For local development, ensure you have sufficient memory available.
+        """)
+        st.stop()
+        return None
 
 @st.cache_data
 def convert_df(df):
