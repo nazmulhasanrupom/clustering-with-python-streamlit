@@ -6,3 +6,7 @@ requests
 openpyxl
 torch>=1.9.0
 transformers>=4.21.0
+flask>=2.0.0
+flask-cors>=4.0.0
+scikit-learn>=1.0.0
+scipy>=1.7.0
