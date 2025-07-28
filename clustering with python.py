@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import importlib
+import os
 
 def install_and_import(package_name, import_name=None, fallback_packages=None):
     """Install and import a package if it's not already installed"""
@@ -11,11 +12,30 @@ def install_and_import(package_name, import_name=None, fallback_packages=None):
         importlib.import_module(import_name)
         return True
     except ImportError:
+        # Check if we're on Streamlit Cloud - if so, skip installation attempts
+        if (os.environ.get('STREAMLIT_CLOUD', False) or 
+            '/home/adminuser' in os.getcwd() or
+            '/mount/src' in os.getcwd() or
+            os.environ.get('STREAMLIT_SHARING', False)):
+            print(f"Streamlit Cloud detected - skipping installation of {package_name}")
+            return False
+        
         print(f"Installing {package_name}...")
+        
+        # Determine pip install command (avoid --user in virtual environments)
+        pip_cmd = [sys.executable, "-m", "pip", "install"]
+        
+        # Check if we can use --user (not in virtual environment)
+        try:
+            import site
+            if hasattr(site, 'USER_SITE') and site.USER_SITE:
+                pip_cmd.append("--user")
+        except:
+            pass  # Skip --user if detection fails
         
         # Try main package first
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package_name])
+            subprocess.check_call(pip_cmd + [package_name])
             importlib.import_module(import_name)
             return True
         except Exception as e:
@@ -27,7 +47,7 @@ def install_and_import(package_name, import_name=None, fallback_packages=None):
                     try:
                         print(f"Trying fallback: {fallback_cmd}")
                         # Split the command properly
-                        cmd_parts = [sys.executable, "-m", "pip", "install", "--user"] + fallback_cmd.split()
+                        cmd_parts = pip_cmd + fallback_cmd.split()
                         subprocess.check_call(cmd_parts)
                         importlib.import_module(import_name)
                         return True
@@ -45,29 +65,46 @@ required_packages = [
     ("openpyxl", "openpyxl", None),
     ("sentence-transformers", "sentence_transformers", [
         "--no-deps sentence-transformers",
-        "transformers torch numpy scikit-learn scipy tqdm",
-        "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu"
+        "transformers torch numpy scikit-learn scipy tqdm"
     ])
 ]
 
-print("Checking and installing required packages...")
-failed_packages = []
-for package, import_name, fallbacks in required_packages:
-    if not install_and_import(package, import_name, fallbacks):
-        print(f"ERROR: Could not install {package}.")
-        failed_packages.append(package)
-        if package == "sentence-transformers":
-            print("For sentence-transformers issues, try manual installation:")
-            print("pip install --user --no-deps sentence-transformers")
-            print("pip install --user transformers torch numpy scikit-learn scipy tqdm")
+# Skip installation on Streamlit Cloud
+STREAMLIT_CLOUD_DETECTED = (
+    os.environ.get('STREAMLIT_CLOUD', False) or 
+    '/home/adminuser' in os.getcwd() or
+    '/mount/src' in os.getcwd() or
+    os.environ.get('STREAMLIT_SHARING', False)
+)
 
-# Continue even if some packages failed
-if failed_packages:
-    print(f"Failed to install: {', '.join(failed_packages)}")
-    print("Continuing with available packages...")
+if not STREAMLIT_CLOUD_DETECTED:
+    print("Checking and installing required packages...")
+    failed_packages = []
+    for package, import_name, fallbacks in required_packages:
+        if not install_and_import(package, import_name, fallbacks):
+            print(f"ERROR: Could not install {package}.")
+            failed_packages.append(package)
+            if package == "sentence-transformers":
+                print("For sentence-transformers issues, try manual installation:")
+                print("pip install --no-deps sentence-transformers")
+                print("pip install transformers torch numpy scikit-learn scipy tqdm")
+
+    # Continue even if some packages failed
+    if failed_packages:
+        print(f"Failed to install: {', '.join(failed_packages)}")
+        print("Continuing with available packages...")
+else:
+    print("Streamlit Cloud detected - skipping automatic installation")
+    print("Please ensure requirements.txt contains all necessary packages")
 
 # Now import everything with fallback handling
 import streamlit as st
+import time
+import pandas as pd
+import numpy as np
+import requests
+import json
+from datetime import datetime
 
 # Try to import sentence-transformers with fallback
 try:
@@ -77,18 +114,10 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 # Check if we're running on Streamlit Cloud (limited installation permissions)
-STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD', False) or '/home/adminuser' in os.getcwd()
+STREAMLIT_CLOUD = STREAMLIT_CLOUD_DETECTED
 
 if STREAMLIT_CLOUD and not SENTENCE_TRANSFORMERS_AVAILABLE:
     st.warning("⚠️ Running on Streamlit Cloud - automatic installation disabled for stability.")
-
-import os
-import time
-import pandas as pd
-import numpy as np
-import requests
-import json
-from datetime import datetime
 
 st.set_page_config(
     page_title="Keyword Clustering Tool",
@@ -188,6 +217,8 @@ def load_model():
             numpy
             requests
             openpyxl
+            torch>=1.9.0
+            transformers>=4.21.0
             ```
             
             2. Redeploy your app with both files
@@ -196,46 +227,23 @@ def load_model():
             """)
             return None
         
-        st.info("🔧 Attempting to install sentence-transformers...")
+        st.error("❌ sentence-transformers not available.")
+        st.markdown("""
+        ### Installation Required:
         
-        # Try multiple installation strategies
-        installation_attempts = [
-            # Strategy 1: Install without dependencies first
-            [sys.executable, "-m", "pip", "install", "--user", "--no-deps", "sentence-transformers"],
-            # Strategy 2: Install core dependencies manually
-            [sys.executable, "-m", "pip", "install", "--user", "transformers", "torch", "numpy", "scikit-learn", "scipy", "tqdm"],
-            # Strategy 3: Try with CPU-only torch
-            [sys.executable, "-m", "pip", "install", "--user", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"],
-            # Strategy 4: Install sentence-transformers again
-            [sys.executable, "-m", "pip", "install", "--user", "sentence-transformers"]
-        ]
+        This app requires sentence-transformers for AI clustering. Please install it manually:
         
-        for i, cmd in enumerate(installation_attempts):
-            try:
-                st.info(f"Installation attempt {i+1}/4...")
-                subprocess.check_call(cmd)
-                if i == len(installation_attempts) - 1:  # Last attempt
-                    try:
-                        from sentence_transformers import SentenceTransformer, util
-                        SENTENCE_TRANSFORMERS_AVAILABLE = True
-                        st.success("✅ sentence-transformers installed successfully!")
-                        break
-                    except ImportError:
-                        continue
-            except Exception as e:
-                st.warning(f"Attempt {i+1} failed: {str(e)[:100]}...")
-                continue
+        ```bash
+        pip install sentence-transformers
+        ```
         
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            st.error("❌ Could not install sentence-transformers.")
-            st.markdown("""
-            ### Alternative Solutions:
-            
-            1. **For Streamlit Cloud**: Use requirements.txt file
-            2. **For Local**: Manual installation with proper permissions
-            3. **Alternative**: Consider simpler text similarity approaches
-            """)
-            return None
+        Or try the CPU-only version:
+        ```bash
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install sentence-transformers
+        ```
+        """)
+        return None
     
     try:
         with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
@@ -254,7 +262,7 @@ def load_model():
         1. **Memory**: Model requires ~400MB of RAM
         2. **Time**: First load may take 1-2 minutes
         3. **Network**: Ensure stable internet connection
-        4. **Permissions**: Installation may require proper permissions
+        4. **Dependencies**: Ensure all packages are properly installed
         """)
         return None
 
@@ -454,7 +462,7 @@ with col1:
                         df = pd.read_csv(uploaded_file)
                     except ImportError:
                         st.error("Installing pandas for CSV support...")
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "pandas"])
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas"])
                         import pandas as pd
                         df = pd.read_csv(uploaded_file)
                     keywords_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
@@ -463,12 +471,12 @@ with col1:
                         df = pd.read_excel(uploaded_file)
                     except ImportError:
                         st.error("Installing openpyxl for Excel support...")
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "openpyxl"])
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
                         df = pd.read_excel(uploaded_file)
                     except Exception:
                         # Fallback: try installing xlrd for older Excel files
                         try:
-                            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "xlrd"])
+                            subprocess.check_call([sys.executable, "-m", "pip", "install", "xlrd"])
                             df = pd.read_excel(uploaded_file)
                         except:
                             st.error("❌ Could not read Excel file. Please save as CSV instead.")
@@ -597,15 +605,25 @@ st.markdown("""
 """)
 
 st.markdown("""
-### � Self-Sufficient App Features:
-- **Auto-Installation**: All required packages are installed automatically
-- **Single File**: No need for requirements.txt or separate dependencies
-- **Streamlit Cloud Ready**: Deploy directly without configuration files
-- **Error Recovery**: Automatic fallback installation methods
+### 🚀 Self-Sufficient App Features:
+- **Auto-Installation**: All required packages are installed automatically (local environments)
+- **Single File**: No need for requirements.txt or separate dependencies (for local use)
+- **Streamlit Cloud Ready**: Use with requirements.txt for cloud deployment
+- **Error Recovery**: Graceful handling when auto-installation isn't possible
+
+### 🌟 Deployment Options:
+
+**For Local Development:**
+- Just run this single file - auto-installation handles everything!
+
+**For Streamlit Cloud:**
+- Upload both `clustering with python.py` and `requirements.txt`
+- The app will detect cloud environment and skip auto-installation
+- All dependencies will be installed via requirements.txt
 """)
 
 st.markdown("""
-### �🔗 API Integration:
+### 🔗 API Integration:
 For n8n or other integrations, you can send POST requests to this Streamlit app using the webhook feature.
 """)
 
@@ -625,7 +643,7 @@ with st.expander("🛠️ Manual Installation Guide"):
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     ```
     
-    **For Streamlit Cloud**: Just upload this single file - no requirements.txt needed!
+    **For Streamlit Cloud**: Upload both this file and the requirements.txt file for automatic installation!
     """)
 
 # Example JSON for API reference
