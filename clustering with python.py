@@ -66,7 +66,9 @@ required_packages = [
     ("sentence-transformers", "sentence_transformers", [
         "--no-deps sentence-transformers",
         "transformers torch numpy scikit-learn scipy tqdm"
-    ])
+    ]),
+    ("flask", "flask", None),
+    ("flask-cors", "flask_cors", None)
 ]
 
 # Skip installation on Streamlit Cloud
@@ -105,6 +107,17 @@ import numpy as np
 import requests
 import json
 from datetime import datetime
+import threading
+import signal
+import atexit
+
+# Try to import Flask and related modules
+try:
+    from flask import Flask, request, jsonify
+    from flask_cors import CORS
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
 
 # Try to import sentence-transformers with fallback
 try:
@@ -115,6 +128,413 @@ except ImportError:
 
 # Check if we're running on Streamlit Cloud (limited installation permissions)
 STREAMLIT_CLOUD = STREAMLIT_CLOUD_DETECTED
+
+# ==================================================
+# CORE CLUSTERING FUNCTIONS
+# ==================================================
+
+@st.cache_resource(show_spinner=False)
+def load_model():
+    """Load the sentence transformer model (cached for Streamlit)"""
+    global SENTENCE_TRANSFORMERS_AVAILABLE
+    
+    if not SENTENCE_TRANSFORMERS_AVAILABLE:
+        if STREAMLIT_CLOUD:
+            st.error("❌ sentence-transformers not available on Streamlit Cloud without requirements.txt")
+            st.markdown("""
+            ### To fix this issue:
+            
+            1. Create a `requirements.txt` file in your repository:
+            ```
+            streamlit
+            sentence-transformers
+            pandas
+            numpy
+            requests
+            openpyxl
+            torch>=1.9.0
+            transformers>=4.21.0
+            flask
+            flask-cors
+            ```
+            
+            2. Redeploy your app with both files
+            """)
+            return None
+        
+        st.error("❌ sentence-transformers not available.")
+        st.markdown("""
+        ### Installation Required:
+        
+        This app requires sentence-transformers for AI clustering. Please install it manually:
+        
+        ```bash
+        pip install sentence-transformers
+        ```
+        """)
+        return None
+    
+    try:
+        with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+        st.success("✅ Model loaded successfully!")
+        return model
+    except Exception as e:
+        st.error(f"❌ Failed to load model: {str(e)}")
+        return None
+
+def get_median_title_cluster(cluster, corpus_keywords):
+    """Get the median length keyword from cluster as representative title"""
+    title_lens = [len(corpus_keywords[i]) for i in cluster]
+    median_idx = cluster[np.argsort(title_lens)[len(title_lens) // 2]]
+    return corpus_keywords[median_idx]
+
+def perform_clustering_core(keywords, threshold_val, min_community_size_val, use_streamlit=True):
+    """Core clustering function that can work with or without Streamlit UI"""
+    
+    # Try to import sentence-transformers
+    try:
+        from sentence_transformers import SentenceTransformer, util
+        model_available = True
+    except ImportError:
+        model_available = False
+    
+    if not model_available:
+        error_msg = "sentence-transformers not available. Please install it first."
+        if use_streamlit:
+            st.error(f"❌ {error_msg}")
+        return None
+    
+    # Load model (without Streamlit caching for API)
+    try:
+        if use_streamlit:
+            model = load_model()  # Use cached version
+        else:
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+    except Exception as e:
+        error_msg = f"Failed to load model: {str(e)}"
+        if use_streamlit:
+            st.error(f"❌ {error_msg}")
+        return None
+    
+    if model is None:
+        return None
+    
+    # Clean and deduplicate keywords
+    corpus_keywords = list(set([k.strip() for k in keywords if k.strip()]))
+    
+    if not corpus_keywords:
+        error_msg = "No valid keywords found in the data."
+        if use_streamlit:
+            st.error(f"❌ {error_msg}")
+        return None
+    
+    if len(corpus_keywords) < min_community_size_val:
+        warning_msg = f"Only {len(corpus_keywords)} unique keywords found. Consider reducing minimum cluster size."
+        if use_streamlit:
+            st.warning(f"⚠️ {warning_msg}")
+    
+    # Show progress only for Streamlit
+    if use_streamlit:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text(f"🔤 Encoding {len(corpus_keywords)} unique keywords...")
+        progress_bar.progress(25)
+    
+    try:
+        # Encoding phase
+        start_encoding = time.time()
+        corpus_embeddings = model.encode(
+            corpus_keywords, 
+            batch_size=32, 
+            show_progress_bar=False, 
+            convert_to_tensor=True
+        )
+        encoding_time = time.time() - start_encoding
+        
+        if use_streamlit:
+            progress_bar.progress(50)
+            status_text.text("🔍 Performing clustering analysis...")
+        
+        # Clustering phase
+        start_clustering = time.time()
+        clusters = util.community_detection(
+            corpus_embeddings, 
+            min_community_size=min_community_size_val, 
+            threshold=threshold_val
+        )
+        clustering_time = time.time() - start_clustering
+        
+        if use_streamlit:
+            progress_bar.progress(75)
+            status_text.text("📊 Organizing results...")
+        
+        # Prepare results
+        clusters_data = []
+        clustered_keywords = set()
+        
+        for i, cluster in enumerate(clusters):
+            cluster_name = get_median_title_cluster(cluster, corpus_keywords)
+            cluster_keywords = [corpus_keywords[keyword_id] for keyword_id in cluster]
+            
+            clusters_data.append({
+                'Cluster ID': i + 1,
+                'Cluster Name': cluster_name,
+                'Keywords': ', '.join(cluster_keywords),
+                'Keyword Count': len(cluster_keywords),
+                'Keyword List': cluster_keywords
+            })
+            
+            clustered_keywords.update(cluster_keywords)
+        
+        # Handle unclustered keywords
+        unclustered_keywords = [k for k in corpus_keywords if k not in clustered_keywords]
+        if unclustered_keywords:
+            clusters_data.append({
+                'Cluster ID': 0,
+                'Cluster Name': 'Unclustered',
+                'Keywords': ', '.join(unclustered_keywords),
+                'Keyword Count': len(unclustered_keywords),
+                'Keyword List': unclustered_keywords
+            })
+        
+        if use_streamlit:
+            progress_bar.progress(100)
+            status_text.text("✅ Clustering completed!")
+        
+        # Create results summary
+        result = {
+            'total_keywords': len(corpus_keywords),
+            'total_clusters': len(clusters),
+            'unclustered_count': len(unclustered_keywords),
+            'processing_time': {
+                'encoding_time': round(encoding_time, 2),
+                'clustering_time': round(clustering_time, 2),
+                'total_time': round(encoding_time + clustering_time, 2)
+            },
+            'parameters': {
+                'threshold': threshold_val,
+                'min_community_size': min_community_size_val
+            },
+            'clusters': clusters_data,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Clear progress indicators for Streamlit
+        if use_streamlit:
+            progress_bar.empty()
+            status_text.empty()
+        
+        return result
+        
+    except Exception as e:
+        if use_streamlit:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ Error during clustering: {str(e)}")
+        return None
+
+def perform_clustering(keywords, threshold_val, min_community_size_val):
+    """Streamlit wrapper for the core clustering function"""
+    return perform_clustering_core(keywords, threshold_val, min_community_size_val, use_streamlit=True)
+
+def send_webhook_result(webhook_url, result_data):
+    """Send the clustering result to the specified webhook URL"""
+    try:
+        with st.spinner(f"📤 Sending results to webhook..."):
+            response = requests.post(
+                webhook_url, 
+                json=result_data, 
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            response.raise_for_status()
+            st.success(f"✅ Webhook sent successfully! Status: {response.status_code}")
+            return True
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Failed to send webhook: {str(e)}")
+        return False
+
+# ==================================================
+# FLASK API FUNCTIONALITY
+# ==================================================
+
+# Global Flask app variable
+flask_app = None
+api_server_thread = None
+
+def create_flask_app():
+    """Create and configure the Flask API server"""
+    if not FLASK_AVAILABLE:
+        return None
+    
+    app = Flask(__name__)
+    CORS(app)  # Enable CORS for all routes
+    
+    @app.route('/health', methods=['GET'])
+    def health_check():
+        """Health check endpoint"""
+        return jsonify({
+            "status": "healthy",
+            "service": "keyword-clustering-api",
+            "timestamp": datetime.now().isoformat(),
+            "sentence_transformers_available": SENTENCE_TRANSFORMERS_AVAILABLE
+        })
+    
+    @app.route('/cluster', methods=['POST'])
+    def cluster_keywords():
+        """Main clustering endpoint for API requests"""
+        try:
+            # Validate content type
+            if not request.is_json:
+                return jsonify({
+                    "error": "Content-Type must be application/json",
+                    "received": request.content_type
+                }), 400
+            
+            data = request.get_json()
+            
+            # Validate required fields
+            if 'keywords' not in data:
+                return jsonify({
+                    "error": "Missing required field: keywords",
+                    "required": ["keywords"],
+                    "optional": ["threshold", "min_community_size", "webhook_url"]
+                }), 400
+            
+            keywords = data['keywords']
+            if not isinstance(keywords, list) or len(keywords) == 0:
+                return jsonify({
+                    "error": "keywords must be a non-empty list of strings"
+                }), 400
+            
+            # Extract parameters with defaults
+            threshold = data.get('threshold', 0.75)
+            min_community_size = data.get('min_community_size', 2)
+            webhook_url = data.get('webhook_url')
+            
+            # Validate parameters
+            if not (0.0 <= threshold <= 1.0):
+                return jsonify({
+                    "error": "threshold must be between 0.0 and 1.0"
+                }), 400
+            
+            if not (1 <= min_community_size <= 20):
+                return jsonify({
+                    "error": "min_community_size must be between 1 and 20"
+                }), 400
+            
+            # Perform clustering (without Streamlit UI)
+            result = perform_clustering_core(
+                keywords, 
+                threshold, 
+                min_community_size, 
+                use_streamlit=False
+            )
+            
+            if result is None:
+                return jsonify({
+                    "error": "Clustering failed",
+                    "details": "Model not available or clustering process failed"
+                }), 500
+            
+            # Send webhook if provided
+            webhook_sent = False
+            webhook_error = None
+            if webhook_url:
+                try:
+                    response = requests.post(
+                        webhook_url, 
+                        json=result, 
+                        headers={'Content-Type': 'application/json'},
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    webhook_sent = True
+                except Exception as e:
+                    webhook_error = str(e)
+            
+            # Add webhook status to response
+            result['webhook_status'] = {
+                'sent': webhook_sent,
+                'error': webhook_error,
+                'url': webhook_url if webhook_url else None
+            }
+            
+            return jsonify(result)
+            
+        except Exception as e:
+            return jsonify({
+                "error": "Internal server error",
+                "details": str(e),
+                "timestamp": datetime.now().isoformat()
+            }), 500
+    
+    @app.route('/', methods=['GET'])
+    def api_info():
+        """API information endpoint"""
+        return jsonify({
+            "service": "Keyword Clustering API",
+            "version": "1.0.0",
+            "endpoints": {
+                "POST /cluster": "Cluster keywords using AI",
+                "GET /health": "Health check",
+                "GET /": "API information"
+            },
+            "example_request": {
+                "url": "/cluster",
+                "method": "POST",
+                "headers": {"Content-Type": "application/json"},
+                "body": {
+                    "keywords": ["machine learning", "AI", "data science"],
+                    "threshold": 0.75,
+                    "min_community_size": 2,
+                    "webhook_url": "https://optional-webhook.com/endpoint"
+                }
+            },
+            "sentence_transformers_available": SENTENCE_TRANSFORMERS_AVAILABLE
+        })
+    
+    return app
+
+def start_api_server(port=5000):
+    """Start the Flask API server in a separate thread"""
+    global flask_app, api_server_thread
+    
+    if not FLASK_AVAILABLE:
+        print("❌ Flask not available. API server cannot start.")
+        return False
+    
+    try:
+        flask_app = create_flask_app()
+        if flask_app is None:
+            return False
+        
+        def run_server():
+            flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+        api_server_thread = threading.Thread(target=run_server, daemon=True)
+        api_server_thread.start()
+        
+        print(f"✅ API server started on http://localhost:{port}")
+        print(f"📊 Clustering endpoint: http://localhost:{port}/cluster")
+        print(f"🔍 Health check: http://localhost:{port}/health")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to start API server: {e}")
+        return False
+
+def stop_api_server():
+    """Stop the API server"""
+    print("API server will stop when the main process exits.")
+
+# Register cleanup
+atexit.register(stop_api_server)
+
+# ==================================================
+# STREAMLIT WEB INTERFACE
+# ==================================================
 
 if STREAMLIT_CLOUD and not SENTENCE_TRANSFORMERS_AVAILABLE:
     st.warning("⚠️ Running on Streamlit Cloud - automatic installation disabled for stability.")
@@ -133,6 +553,16 @@ with st.sidebar:
     else:
         st.warning("⚠️ AI model installation pending")
         st.caption("Some features may be limited")
+    
+    # API Server Controls
+    st.subheader("🚀 API Server")
+    if FLASK_AVAILABLE and SENTENCE_TRANSFORMERS_AVAILABLE:
+        if st.button("🌐 Start API Server", help="Start Flask API server on port 5000"):
+            if start_api_server(5000):
+                st.success("API server started!")
+                st.info("API running on http://localhost:5000")
+    else:
+        st.warning("API server requires Flask and sentence-transformers")
 
 st.title('🔍 Keyword Clustering Tool')
 st.markdown("Cluster similar keywords using AI-powered semantic analysis")
@@ -155,6 +585,8 @@ else:
         openpyxl
         torch>=1.9.0
         transformers>=4.21.0
+        flask
+        flask-cors
         ```
         
         Then deploy with both files: `clustering with python.py` and `requirements.txt`
@@ -199,226 +631,9 @@ webhook_url = st.sidebar.text_input(
     help="Send results to this URL after clustering"
 )
 
-@st.cache_resource(show_spinner=False)
-def load_model():
-    global SENTENCE_TRANSFORMERS_AVAILABLE
-    
-    if not SENTENCE_TRANSFORMERS_AVAILABLE:
-        if STREAMLIT_CLOUD:
-            st.error("❌ sentence-transformers not available on Streamlit Cloud without requirements.txt")
-            st.markdown("""
-            ### To fix this issue:
-            
-            1. Create a `requirements.txt` file in your repository:
-            ```
-            streamlit
-            sentence-transformers
-            pandas
-            numpy
-            requests
-            openpyxl
-            torch>=1.9.0
-            transformers>=4.21.0
-            ```
-            
-            2. Redeploy your app with both files
-            
-            3. Alternative: Use a different clustering approach that doesn't require heavy ML libraries
-            """)
-            return None
-        
-        st.error("❌ sentence-transformers not available.")
-        st.markdown("""
-        ### Installation Required:
-        
-        This app requires sentence-transformers for AI clustering. Please install it manually:
-        
-        ```bash
-        pip install sentence-transformers
-        ```
-        
-        Or try the CPU-only version:
-        ```bash
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        pip install sentence-transformers
-        ```
-        """)
-        return None
-    
-    try:
-        with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
-            # Import here in case it was just installed
-            if not SENTENCE_TRANSFORMERS_AVAILABLE:
-                from sentence_transformers import SentenceTransformer, util
-            
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-        st.success("✅ Model loaded successfully!")
-        return model
-    except Exception as e:
-        st.error(f"❌ Failed to load model: {str(e)}")
-        st.markdown("""
-        ### Troubleshooting
-        
-        1. **Memory**: Model requires ~400MB of RAM
-        2. **Time**: First load may take 1-2 minutes
-        3. **Network**: Ensure stable internet connection
-        4. **Dependencies**: Ensure all packages are properly installed
-        """)
-        return None
-
 @st.cache_data
 def convert_df(df):
     return df.to_csv(index=False).encode('utf-8')
-
-def get_median_title_cluster(cluster, corpus_keywords):
-    """Get the median length keyword from cluster as representative title"""
-    title_lens = [len(corpus_keywords[i]) for i in cluster]
-    median_idx = cluster[np.argsort(title_lens)[len(title_lens) // 2]]
-    return corpus_keywords[median_idx]
-
-def perform_clustering(keywords, threshold_val, min_community_size_val):
-    """Perform clustering on the provided keywords"""
-    
-    # Load model
-    model = load_model()
-    
-    if model is None:
-        st.error("❌ Cannot perform clustering without AI model. Please check installation.")
-        st.markdown("""
-        ### Fallback Options:
-        
-        1. **Try refreshing** the page to retry installation
-        2. **Use local installation** with proper dependencies
-        3. **Consider manual clustering** based on keyword similarity
-        
-        For Streamlit Cloud users: This is a known limitation due to system dependency requirements.
-        """)
-        return None
-    
-    # Clean and deduplicate keywords
-    corpus_keywords = list(set([k.strip() for k in keywords if k.strip()]))
-    
-    if not corpus_keywords:
-        st.error("❌ No valid keywords found in the data.")
-        return None
-    
-    if len(corpus_keywords) < min_community_size_val:
-        st.warning(f"⚠️ Only {len(corpus_keywords)} unique keywords found. Consider reducing minimum cluster size.")
-    
-    # Show progress
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    try:
-        # Encoding phase
-        status_text.text(f"🔤 Encoding {len(corpus_keywords)} unique keywords...")
-        progress_bar.progress(25)
-        
-        start_encoding = time.time()
-        corpus_embeddings = model.encode(
-            corpus_keywords, 
-            batch_size=DEFAULT_BATCH_SIZE, 
-            show_progress_bar=False, 
-            convert_to_tensor=True
-        )
-        encoding_time = time.time() - start_encoding
-        
-        progress_bar.progress(50)
-        status_text.text("🔍 Performing clustering analysis...")
-        
-        # Import util here in case it wasn't available before
-        from sentence_transformers import util
-        
-        # Clustering phase
-        start_clustering = time.time()
-        clusters = util.community_detection(
-            corpus_embeddings, 
-            min_community_size=min_community_size_val, 
-            threshold=threshold_val
-        )
-        clustering_time = time.time() - start_clustering
-        
-        progress_bar.progress(75)
-        status_text.text("📊 Organizing results...")
-        
-        # Prepare results
-        clusters_data = []
-        clustered_keywords = set()
-        
-        for i, cluster in enumerate(clusters):
-            cluster_name = get_median_title_cluster(cluster, corpus_keywords)
-            cluster_keywords = [corpus_keywords[keyword_id] for keyword_id in cluster]
-            
-            clusters_data.append({
-                'Cluster ID': i + 1,
-                'Cluster Name': cluster_name,
-                'Keywords': ', '.join(cluster_keywords),
-                'Keyword Count': len(cluster_keywords),
-                'Keyword List': cluster_keywords
-            })
-            
-            clustered_keywords.update(cluster_keywords)
-        
-        # Handle unclustered keywords
-        unclustered_keywords = [k for k in corpus_keywords if k not in clustered_keywords]
-        if unclustered_keywords:
-            clusters_data.append({
-                'Cluster ID': 0,
-                'Cluster Name': 'Unclustered',
-                'Keywords': ', '.join(unclustered_keywords),
-                'Keyword Count': len(unclustered_keywords),
-                'Keyword List': unclustered_keywords
-            })
-        
-        progress_bar.progress(100)
-        status_text.text("✅ Clustering completed!")
-        
-        # Create results summary
-        result = {
-            'total_keywords': len(corpus_keywords),
-            'total_clusters': len(clusters),
-            'unclustered_count': len(unclustered_keywords),
-            'processing_time': {
-                'encoding_time': round(encoding_time, 2),
-                'clustering_time': round(clustering_time, 2),
-                'total_time': round(encoding_time + clustering_time, 2)
-            },
-            'parameters': {
-                'threshold': threshold_val,
-                'min_community_size': min_community_size_val
-            },
-            'clusters': clusters_data,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Clear progress indicators
-        progress_bar.empty()
-        status_text.empty()
-        
-        return result
-        
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"❌ Error during clustering: {str(e)}")
-        return None
-
-def send_webhook_result(webhook_url, result_data):
-    """Send the clustering result to the specified webhook URL"""
-    try:
-        with st.spinner(f"📤 Sending results to webhook..."):
-            response = requests.post(
-                webhook_url, 
-                json=result_data, 
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            response.raise_for_status()
-            st.success(f"✅ Webhook sent successfully! Status: {response.status_code}")
-            return True
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ Failed to send webhook: {str(e)}")
-        return False
 
 # Main interface
 col1, col2 = st.columns([2, 1])
@@ -610,21 +825,36 @@ st.markdown("""
 - **Single File**: No need for requirements.txt or separate dependencies (for local use)
 - **Streamlit Cloud Ready**: Use with requirements.txt for cloud deployment
 - **Error Recovery**: Graceful handling when auto-installation isn't possible
+- **Built-in API**: Flask API server for n8n and other integrations
 
 ### 🌟 Deployment Options:
 
 **For Local Development:**
 - Just run this single file - auto-installation handles everything!
+- Start the API server from the sidebar for n8n integration
 
 **For Streamlit Cloud:**
 - Upload both `clustering with python.py` and `requirements.txt`
 - The app will detect cloud environment and skip auto-installation
 - All dependencies will be installed via requirements.txt
-""")
 
-st.markdown("""
 ### 🔗 API Integration:
-For n8n or other integrations, you can send POST requests to this Streamlit app using the webhook feature.
+**API Endpoints:**
+- `POST /cluster` - Cluster keywords
+- `GET /health` - Health check
+- `GET /` - API information
+
+**Example cURL:**
+```bash
+curl -X POST http://localhost:5000/cluster \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "keywords": ["machine learning", "AI", "data science"],
+    "threshold": 0.75,
+    "min_community_size": 2,
+    "webhook_url": "https://your-webhook.com/endpoint"
+  }'
+```
 """)
 
 # Installation guide for manual deployment
@@ -635,6 +865,9 @@ with st.expander("🛠️ Manual Installation Guide"):
     ```bash
     # Core dependencies
     pip install streamlit sentence-transformers pandas numpy requests
+    
+    # API dependencies
+    pip install flask flask-cors
     
     # Optional dependencies for file support
     pip install openpyxl xlrd
@@ -647,22 +880,21 @@ with st.expander("🛠️ Manual Installation Guide"):
     """)
 
 # Example JSON for API reference
-with st.expander("📋 Example Webhook Payload"):
+with st.expander("📋 Example API Payload"):
     example_payload = {
-        "total_keywords": 10,
-        "total_clusters": 3,
-        "clusters": [
-            {
-                "cluster_id": 1,
-                "cluster_name": "machine learning",
-                "keywords": ["machine learning", "deep learning", "neural networks"],
-                "keyword_count": 3
-            }
+        "keywords": [
+            "machine learning",
+            "artificial intelligence",
+            "deep learning",
+            "neural networks",
+            "data science"
         ],
-        "timestamp": "2025-07-28T10:30:45.123456"
+        "threshold": 0.75,
+        "min_community_size": 2,
+        "webhook_url": "https://your-webhook-url.com/endpoint"
     }
     st.code(json.dumps(example_payload, indent=2), language='json')
 
 # App information
 st.markdown("---")
-st.caption("🔍 Keyword Clustering Tool | Self-Sufficient Single File App | Auto-installs all dependencies")
+st.caption("🔍 Keyword Clustering Tool | Self-Sufficient Single File App | Web Interface + API Server")
