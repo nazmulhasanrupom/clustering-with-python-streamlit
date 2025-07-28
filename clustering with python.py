@@ -15,7 +15,7 @@ def install_and_import(package_name, import_name=None, fallback_packages=None):
         
         # Try main package first
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package_name])
             importlib.import_module(import_name)
             return True
         except Exception as e:
@@ -23,14 +23,16 @@ def install_and_import(package_name, import_name=None, fallback_packages=None):
             
             # Try fallback packages
             if fallback_packages:
-                for fallback in fallback_packages:
+                for fallback_cmd in fallback_packages:
                     try:
-                        print(f"Trying fallback: {fallback}")
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", fallback])
+                        print(f"Trying fallback: {fallback_cmd}")
+                        # Split the command properly
+                        cmd_parts = [sys.executable, "-m", "pip", "install", "--user"] + fallback_cmd.split()
+                        subprocess.check_call(cmd_parts)
                         importlib.import_module(import_name)
                         return True
                     except Exception as fallback_error:
-                        print(f"Fallback {fallback} also failed: {fallback_error}")
+                        print(f"Fallback {fallback_cmd} also failed: {fallback_error}")
             
             return False
 
@@ -43,21 +45,26 @@ required_packages = [
     ("openpyxl", "openpyxl", None),
     ("sentence-transformers", "sentence_transformers", [
         "--no-deps sentence-transformers",
-        "transformers torch numpy scikit-learn scipy nltk tqdm",
-        "transformers>=4.6.0 torch>=1.6.0 torchvision torchaudio numpy scikit-learn scipy nltk tqdm"
+        "transformers torch numpy scikit-learn scipy tqdm",
+        "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu"
     ])
 ]
 
 print("Checking and installing required packages...")
+failed_packages = []
 for package, import_name, fallbacks in required_packages:
     if not install_and_import(package, import_name, fallbacks):
-        print(f"ERROR: Could not install {package}. Please install manually with: pip install {package}")
+        print(f"ERROR: Could not install {package}.")
+        failed_packages.append(package)
         if package == "sentence-transformers":
-            print("For sentence-transformers issues, try:")
-            print("pip install --no-deps sentence-transformers")
-            print("pip install transformers torch numpy scikit-learn scipy nltk tqdm")
-        # Don't exit, continue with other packages
-        continue
+            print("For sentence-transformers issues, try manual installation:")
+            print("pip install --user --no-deps sentence-transformers")
+            print("pip install --user transformers torch numpy scikit-learn scipy tqdm")
+
+# Continue even if some packages failed
+if failed_packages:
+    print(f"Failed to install: {', '.join(failed_packages)}")
+    print("Continuing with available packages...")
 
 # Now import everything with fallback handling
 import streamlit as st
@@ -67,8 +74,13 @@ try:
     from sentence_transformers import SentenceTransformer, util
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
-    st.error("⚠️ sentence-transformers not available. Attempting alternative installation...")
     SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+# Check if we're running on Streamlit Cloud (limited installation permissions)
+STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD', False) or '/home/adminuser' in os.getcwd()
+
+if STREAMLIT_CLOUD and not SENTENCE_TRANSFORMERS_AVAILABLE:
+    st.warning("⚠️ Running on Streamlit Cloud - automatic installation disabled for stability.")
 
 import os
 import time
@@ -99,11 +111,31 @@ st.markdown("Cluster similar keywords using AI-powered semantic analysis")
 if SENTENCE_TRANSFORMERS_AVAILABLE:
     st.info("🚀 **Self-Sufficient App**: All dependencies are automatically installed!")
 else:
-    st.warning("⚠️ **Installation Issues**: The AI model couldn't be installed automatically. Basic functionality available.")
-    
-    # Add a button to retry installation
-    if st.button("🔄 Retry AI Model Installation"):
-        st.rerun()
+    if STREAMLIT_CLOUD:
+        st.error("❌ **Streamlit Cloud Limitation**: AI clustering requires sentence-transformers to be pre-installed.")
+        st.markdown("""
+        ### For Streamlit Cloud Deployment:
+        
+        Create a `requirements.txt` file with:
+        ```
+        streamlit
+        sentence-transformers
+        pandas
+        numpy
+        requests
+        openpyxl
+        torch>=1.9.0
+        transformers>=4.21.0
+        ```
+        
+        Then deploy with both files: `clustering with python.py` and `requirements.txt`
+        """)
+    else:
+        st.warning("⚠️ **Installation Issues**: The AI model couldn't be installed automatically. Basic functionality available.")
+        
+        # Add a button to retry installation
+        if st.button("🔄 Retry AI Model Installation"):
+            st.rerun()
 
 # Best default parameters for optimal performance
 DEFAULT_THRESHOLD = 0.75  # Good balance between precision and recall for keywords
@@ -138,24 +170,44 @@ webhook_url = st.sidebar.text_input(
     help="Send results to this URL after clustering"
 )
 
-# Model caching with better error handling and auto-install fallback
 @st.cache_resource(show_spinner=False)
 def load_model():
     global SENTENCE_TRANSFORMERS_AVAILABLE
     
     if not SENTENCE_TRANSFORMERS_AVAILABLE:
-        st.error("🔧 Installing sentence-transformers dependencies...")
+        if STREAMLIT_CLOUD:
+            st.error("❌ sentence-transformers not available on Streamlit Cloud without requirements.txt")
+            st.markdown("""
+            ### To fix this issue:
+            
+            1. Create a `requirements.txt` file in your repository:
+            ```
+            streamlit
+            sentence-transformers
+            pandas
+            numpy
+            requests
+            openpyxl
+            ```
+            
+            2. Redeploy your app with both files
+            
+            3. Alternative: Use a different clustering approach that doesn't require heavy ML libraries
+            """)
+            return None
+        
+        st.info("🔧 Attempting to install sentence-transformers...")
         
         # Try multiple installation strategies
         installation_attempts = [
             # Strategy 1: Install without dependencies first
-            [sys.executable, "-m", "pip", "install", "--no-deps", "sentence-transformers"],
+            [sys.executable, "-m", "pip", "install", "--user", "--no-deps", "sentence-transformers"],
             # Strategy 2: Install core dependencies manually
-            [sys.executable, "-m", "pip", "install", "transformers", "torch", "numpy", "scikit-learn", "scipy", "nltk", "tqdm"],
+            [sys.executable, "-m", "pip", "install", "--user", "transformers", "torch", "numpy", "scikit-learn", "scipy", "tqdm"],
             # Strategy 3: Try with CPU-only torch
-            [sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"],
+            [sys.executable, "-m", "pip", "install", "--user", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"],
             # Strategy 4: Install sentence-transformers again
-            [sys.executable, "-m", "pip", "install", "sentence-transformers"]
+            [sys.executable, "-m", "pip", "install", "--user", "sentence-transformers"]
         ]
         
         for i, cmd in enumerate(installation_attempts):
@@ -175,19 +227,13 @@ def load_model():
                 continue
         
         if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            st.error("❌ Could not install sentence-transformers. Using fallback method...")
+            st.error("❌ Could not install sentence-transformers.")
             st.markdown("""
             ### Alternative Solutions:
             
-            1. **Manual Installation**: Install dependencies manually:
-            ```bash
-            pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-            pip install transformers sentence-transformers
-            ```
-            
-            2. **Use Different Model**: Consider using a simpler text similarity approach
-            
-            3. **Local Development**: This error is common on Streamlit Cloud due to system dependencies
+            1. **For Streamlit Cloud**: Use requirements.txt file
+            2. **For Local**: Manual installation with proper permissions
+            3. **Alternative**: Consider simpler text similarity approaches
             """)
             return None
     
@@ -205,13 +251,10 @@ def load_model():
         st.markdown("""
         ### Troubleshooting
         
-        If you're getting errors:
-        1. The model requires ~400MB of RAM
-        2. First load may take 1-2 minutes
-        3. Ensure you have a stable internet connection for model download
-        4. Try refreshing the page if installation fails
-        
-        **For Streamlit Cloud**: This is a known issue with building packages that require system dependencies.
+        1. **Memory**: Model requires ~400MB of RAM
+        2. **Time**: First load may take 1-2 minutes
+        3. **Network**: Ensure stable internet connection
+        4. **Permissions**: Installation may require proper permissions
         """)
         return None
 
@@ -411,7 +454,7 @@ with col1:
                         df = pd.read_csv(uploaded_file)
                     except ImportError:
                         st.error("Installing pandas for CSV support...")
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas"])
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "pandas"])
                         import pandas as pd
                         df = pd.read_csv(uploaded_file)
                     keywords_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
@@ -420,12 +463,12 @@ with col1:
                         df = pd.read_excel(uploaded_file)
                     except ImportError:
                         st.error("Installing openpyxl for Excel support...")
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "openpyxl"])
                         df = pd.read_excel(uploaded_file)
                     except Exception:
                         # Fallback: try installing xlrd for older Excel files
                         try:
-                            subprocess.check_call([sys.executable, "-m", "pip", "install", "xlrd"])
+                            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "xlrd"])
                             df = pd.read_excel(uploaded_file)
                         except:
                             st.error("❌ Could not read Excel file. Please save as CSV instead.")
