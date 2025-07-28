@@ -2,7 +2,7 @@ import subprocess
 import sys
 import importlib
 
-def install_and_import(package_name, import_name=None):
+def install_and_import(package_name, import_name=None, fallback_packages=None):
     """Install and import a package if it's not already installed"""
     if import_name is None:
         import_name = package_name
@@ -12,33 +12,64 @@ def install_and_import(package_name, import_name=None):
         return True
     except ImportError:
         print(f"Installing {package_name}...")
+        
+        # Try main package first
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
             importlib.import_module(import_name)
             return True
         except Exception as e:
             print(f"Failed to install {package_name}: {e}")
+            
+            # Try fallback packages
+            if fallback_packages:
+                for fallback in fallback_packages:
+                    try:
+                        print(f"Trying fallback: {fallback}")
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", fallback])
+                        importlib.import_module(import_name)
+                        return True
+                    except Exception as fallback_error:
+                        print(f"Fallback {fallback} also failed: {fallback_error}")
+            
             return False
 
-# Auto-install required packages
+# Auto-install required packages with fallbacks
 required_packages = [
-    ("streamlit", "streamlit"),
-    ("sentence-transformers", "sentence_transformers"),
-    ("pandas", "pandas"),
-    ("numpy", "numpy"),
-    ("requests", "requests"),
-    ("openpyxl", "openpyxl")
+    ("streamlit", "streamlit", None),
+    ("pandas", "pandas", None),
+    ("numpy", "numpy", None),
+    ("requests", "requests", None),
+    ("openpyxl", "openpyxl", None),
+    ("sentence-transformers", "sentence_transformers", [
+        "--no-deps sentence-transformers",
+        "transformers torch numpy scikit-learn scipy nltk tqdm",
+        "transformers>=4.6.0 torch>=1.6.0 torchvision torchaudio numpy scikit-learn scipy nltk tqdm"
+    ])
 ]
 
 print("Checking and installing required packages...")
-for package, import_name in required_packages:
-    if not install_and_import(package, import_name):
+for package, import_name, fallbacks in required_packages:
+    if not install_and_import(package, import_name, fallbacks):
         print(f"ERROR: Could not install {package}. Please install manually with: pip install {package}")
-        sys.exit(1)
+        if package == "sentence-transformers":
+            print("For sentence-transformers issues, try:")
+            print("pip install --no-deps sentence-transformers")
+            print("pip install transformers torch numpy scikit-learn scipy nltk tqdm")
+        # Don't exit, continue with other packages
+        continue
 
-# Now import everything
+# Now import everything with fallback handling
 import streamlit as st
-from sentence_transformers import SentenceTransformer, util
+
+# Try to import sentence-transformers with fallback
+try:
+    from sentence_transformers import SentenceTransformer, util
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    st.error("⚠️ sentence-transformers not available. Attempting alternative installation...")
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
 import os
 import time
 import pandas as pd
@@ -55,12 +86,24 @@ st.set_page_config(
 
 # Add installation status in sidebar
 with st.sidebar:
-    st.success("✅ All packages installed!")
-    st.caption("This app auto-installs dependencies")
+    if SENTENCE_TRANSFORMERS_AVAILABLE:
+        st.success("✅ All packages installed!")
+        st.caption("This app auto-installs dependencies")
+    else:
+        st.warning("⚠️ AI model installation pending")
+        st.caption("Some features may be limited")
 
 st.title('🔍 Keyword Clustering Tool')
 st.markdown("Cluster similar keywords using AI-powered semantic analysis")
-st.info("🚀 **Self-Sufficient App**: All dependencies are automatically installed!")
+
+if SENTENCE_TRANSFORMERS_AVAILABLE:
+    st.info("🚀 **Self-Sufficient App**: All dependencies are automatically installed!")
+else:
+    st.warning("⚠️ **Installation Issues**: The AI model couldn't be installed automatically. Basic functionality available.")
+    
+    # Add a button to retry installation
+    if st.button("🔄 Retry AI Model Installation"):
+        st.rerun()
 
 # Best default parameters for optimal performance
 DEFAULT_THRESHOLD = 0.75  # Good balance between precision and recall for keywords
@@ -98,17 +141,64 @@ webhook_url = st.sidebar.text_input(
 # Model caching with better error handling and auto-install fallback
 @st.cache_resource(show_spinner=False)
 def load_model():
+    global SENTENCE_TRANSFORMERS_AVAILABLE
+    
+    if not SENTENCE_TRANSFORMERS_AVAILABLE:
+        st.error("🔧 Installing sentence-transformers dependencies...")
+        
+        # Try multiple installation strategies
+        installation_attempts = [
+            # Strategy 1: Install without dependencies first
+            [sys.executable, "-m", "pip", "install", "--no-deps", "sentence-transformers"],
+            # Strategy 2: Install core dependencies manually
+            [sys.executable, "-m", "pip", "install", "transformers", "torch", "numpy", "scikit-learn", "scipy", "nltk", "tqdm"],
+            # Strategy 3: Try with CPU-only torch
+            [sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"],
+            # Strategy 4: Install sentence-transformers again
+            [sys.executable, "-m", "pip", "install", "sentence-transformers"]
+        ]
+        
+        for i, cmd in enumerate(installation_attempts):
+            try:
+                st.info(f"Installation attempt {i+1}/4...")
+                subprocess.check_call(cmd)
+                if i == len(installation_attempts) - 1:  # Last attempt
+                    try:
+                        from sentence_transformers import SentenceTransformer, util
+                        SENTENCE_TRANSFORMERS_AVAILABLE = True
+                        st.success("✅ sentence-transformers installed successfully!")
+                        break
+                    except ImportError:
+                        continue
+            except Exception as e:
+                st.warning(f"Attempt {i+1} failed: {str(e)[:100]}...")
+                continue
+        
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            st.error("❌ Could not install sentence-transformers. Using fallback method...")
+            st.markdown("""
+            ### Alternative Solutions:
+            
+            1. **Manual Installation**: Install dependencies manually:
+            ```bash
+            pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+            pip install transformers sentence-transformers
+            ```
+            
+            2. **Use Different Model**: Consider using a simpler text similarity approach
+            
+            3. **Local Development**: This error is common on Streamlit Cloud due to system dependencies
+            """)
+            return None
+    
     try:
         with st.spinner("🤖 Loading AI model... This may take up to 2 minutes on first run."):
-            # Try to import sentence_transformers again in case it was just installed
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError:
-                st.error("Installing sentence-transformers...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
-                from sentence_transformers import SentenceTransformer
+            # Import here in case it was just installed
+            if not SENTENCE_TRANSFORMERS_AVAILABLE:
+                from sentence_transformers import SentenceTransformer, util
             
             model = SentenceTransformer('all-MiniLM-L6-v2')
+        st.success("✅ Model loaded successfully!")
         return model
     except Exception as e:
         st.error(f"❌ Failed to load model: {str(e)}")
@@ -121,21 +211,8 @@ def load_model():
         3. Ensure you have a stable internet connection for model download
         4. Try refreshing the page if installation fails
         
-        For local development, you can manually install with:
-        ```bash
-        pip install sentence-transformers torch transformers
-        ```
+        **For Streamlit Cloud**: This is a known issue with building packages that require system dependencies.
         """)
-        # Try manual installation as fallback
-        try:
-            st.info("Attempting manual installation of dependencies...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"])
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "sentence-transformers"])
-            st.success("✅ Dependencies installed! Please refresh the page.")
-            st.stop()
-        except:
-            st.error("❌ Automatic installation failed. Please install manually.")
-            st.stop()
         return None
 
 @st.cache_data
@@ -154,6 +231,19 @@ def perform_clustering(keywords, threshold_val, min_community_size_val):
     # Load model
     model = load_model()
     
+    if model is None:
+        st.error("❌ Cannot perform clustering without AI model. Please check installation.")
+        st.markdown("""
+        ### Fallback Options:
+        
+        1. **Try refreshing** the page to retry installation
+        2. **Use local installation** with proper dependencies
+        3. **Consider manual clustering** based on keyword similarity
+        
+        For Streamlit Cloud users: This is a known limitation due to system dependency requirements.
+        """)
+        return None
+    
     # Clean and deduplicate keywords
     corpus_keywords = list(set([k.strip() for k in keywords if k.strip()]))
     
@@ -168,89 +258,99 @@ def perform_clustering(keywords, threshold_val, min_community_size_val):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Encoding phase
-    status_text.text(f"🔤 Encoding {len(corpus_keywords)} unique keywords...")
-    progress_bar.progress(25)
-    
-    start_encoding = time.time()
-    corpus_embeddings = model.encode(
-        corpus_keywords, 
-        batch_size=DEFAULT_BATCH_SIZE, 
-        show_progress_bar=False, 
-        convert_to_tensor=True
-    )
-    encoding_time = time.time() - start_encoding
-    
-    progress_bar.progress(50)
-    status_text.text("🔍 Performing clustering analysis...")
-    
-    # Clustering phase
-    start_clustering = time.time()
-    clusters = util.community_detection(
-        corpus_embeddings, 
-        min_community_size=min_community_size_val, 
-        threshold=threshold_val
-    )
-    clustering_time = time.time() - start_clustering
-    
-    progress_bar.progress(75)
-    status_text.text("📊 Organizing results...")
-    
-    # Prepare results
-    clusters_data = []
-    clustered_keywords = set()
-    
-    for i, cluster in enumerate(clusters):
-        cluster_name = get_median_title_cluster(cluster, corpus_keywords)
-        cluster_keywords = [corpus_keywords[keyword_id] for keyword_id in cluster]
+    try:
+        # Encoding phase
+        status_text.text(f"🔤 Encoding {len(corpus_keywords)} unique keywords...")
+        progress_bar.progress(25)
         
-        clusters_data.append({
-            'Cluster ID': i + 1,
-            'Cluster Name': cluster_name,
-            'Keywords': ', '.join(cluster_keywords),
-            'Keyword Count': len(cluster_keywords),
-            'Keyword List': cluster_keywords
-        })
+        start_encoding = time.time()
+        corpus_embeddings = model.encode(
+            corpus_keywords, 
+            batch_size=DEFAULT_BATCH_SIZE, 
+            show_progress_bar=False, 
+            convert_to_tensor=True
+        )
+        encoding_time = time.time() - start_encoding
         
-        clustered_keywords.update(cluster_keywords)
-    
-    # Handle unclustered keywords
-    unclustered_keywords = [k for k in corpus_keywords if k not in clustered_keywords]
-    if unclustered_keywords:
-        clusters_data.append({
-            'Cluster ID': 0,
-            'Cluster Name': 'Unclustered',
-            'Keywords': ', '.join(unclustered_keywords),
-            'Keyword Count': len(unclustered_keywords),
-            'Keyword List': unclustered_keywords
-        })
-    
-    progress_bar.progress(100)
-    status_text.text("✅ Clustering completed!")
-    
-    # Create results summary
-    result = {
-        'total_keywords': len(corpus_keywords),
-        'total_clusters': len(clusters),
-        'unclustered_count': len(unclustered_keywords),
-        'processing_time': {
-            'encoding_time': round(encoding_time, 2),
-            'clustering_time': round(clustering_time, 2),
-            'total_time': round(encoding_time + clustering_time, 2)
-        },
-        'parameters': {
-            'threshold': threshold_val,
-            'min_community_size': min_community_size_val
-        },
-        'clusters': clusters_data,
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    # Clear progress indicators
-    progress_bar.empty()
-    status_text.empty()
-    
-    return result
+        progress_bar.progress(50)
+        status_text.text("🔍 Performing clustering analysis...")
+        
+        # Import util here in case it wasn't available before
+        from sentence_transformers import util
+        
+        # Clustering phase
+        start_clustering = time.time()
+        clusters = util.community_detection(
+            corpus_embeddings, 
+            min_community_size=min_community_size_val, 
+            threshold=threshold_val
+        )
+        clustering_time = time.time() - start_clustering
+        
+        progress_bar.progress(75)
+        status_text.text("📊 Organizing results...")
+        
+        # Prepare results
+        clusters_data = []
+        clustered_keywords = set()
+        
+        for i, cluster in enumerate(clusters):
+            cluster_name = get_median_title_cluster(cluster, corpus_keywords)
+            cluster_keywords = [corpus_keywords[keyword_id] for keyword_id in cluster]
+            
+            clusters_data.append({
+                'Cluster ID': i + 1,
+                'Cluster Name': cluster_name,
+                'Keywords': ', '.join(cluster_keywords),
+                'Keyword Count': len(cluster_keywords),
+                'Keyword List': cluster_keywords
+            })
+            
+            clustered_keywords.update(cluster_keywords)
+        
+        # Handle unclustered keywords
+        unclustered_keywords = [k for k in corpus_keywords if k not in clustered_keywords]
+        if unclustered_keywords:
+            clusters_data.append({
+                'Cluster ID': 0,
+                'Cluster Name': 'Unclustered',
+                'Keywords': ', '.join(unclustered_keywords),
+                'Keyword Count': len(unclustered_keywords),
+                'Keyword List': unclustered_keywords
+            })
+        
+        progress_bar.progress(100)
+        status_text.text("✅ Clustering completed!")
+        
+        # Create results summary
+        result = {
+            'total_keywords': len(corpus_keywords),
+            'total_clusters': len(clusters),
+            'unclustered_count': len(unclustered_keywords),
+            'processing_time': {
+                'encoding_time': round(encoding_time, 2),
+                'clustering_time': round(clustering_time, 2),
+                'total_time': round(encoding_time + clustering_time, 2)
+            },
+            'parameters': {
+                'threshold': threshold_val,
+                'min_community_size': min_community_size_val
+            },
+            'clusters': clusters_data,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Clear progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        return result
+        
+    except Exception as e:
+        progress_bar.empty()
+        status_text.empty()
+        st.error(f"❌ Error during clustering: {str(e)}")
+        return None
 
 def send_webhook_result(webhook_url, result_data):
     """Send the clustering result to the specified webhook URL"""
