@@ -1,0 +1,25 @@
+{
+  "keywords": [
+    "machine learning",
+    "artificial intelligence",
+    "deep learning",
+    "neural networks",
+    "data science",
+    "computer vision",
+    "natural language processing",
+    "python programming",
+    "web development",
+    "react framework",
+    "javascript",
+    "node.js",
+    "database design",
+    "sql queries",
+    "mongodb",
+    "cloud computing",
+    "aws services",
+    "docker containers"
+  ],
+  "threshold": 0.75,
+  "min_community_size": 2,
+  "webhook_url": "https://your-webhook-url.com/endpoint"
+}
